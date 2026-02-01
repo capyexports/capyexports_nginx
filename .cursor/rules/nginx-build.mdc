@@ -1,0 +1,82 @@
+---
+description: Git 仓库中 Nginx 镜像的构建规范（Dockerfile、目录结构、CI）。
+globs: ["nginx/Dockerfile", "nginx/**/*.conf", ".github/workflows/*nginx*", ".github/workflows/*gateway*"]
+alwaysApply: false
+---
+
+# Nginx Image Build (Git)
+
+规范在 Git 仓库中如何构建 Nginx 网关镜像：目录结构、Dockerfile、以及可选 CI 构建与推送。
+
+## 1. 仓库目录结构 (Repo Layout)
+
+Nginx 相关文件建议放在 `nginx/` 下，与编排和 Demo 同仓或独立仓均可：
+
+```
+nginx/
+├── Dockerfile          # Nginx 镜像构建
+├── nginx.conf          # 主配置（可选，不写则用镜像默认）
+├── conf.d/             # 站点/反向代理配置，被主配置 include
+│   ├── default.conf
+│   └── demos.conf
+└── .dockerignore       # 可选，排除无关文件
+```
+
+- **构建上下文**: 以 `nginx/` 为构建上下文（`docker build -f nginx/Dockerfile nginx/`），或仓库根目录且 Dockerfile 内 `COPY` 路径与上述一致。
+- **配置生效**: 主配置中需 `include /etc/nginx/conf.d/*.conf`；站点配置一律放在 `conf.d/`，与 nginx-gateway.mdc 约定一致。
+
+## 2. Dockerfile 规范 (Dockerfile)
+
+- **Base 镜像**: 使用官方 `nginx:alpine`，保持体积小、与现有 Alpine 体系一致。
+- **配置拷贝**: 将 `nginx.conf`（若有）和 `conf.d/` 拷贝到镜像内标准路径（如 `/etc/nginx/nginx.conf`、`/etc/nginx/conf.d/`）。
+- **权限**: 保持 Nginx 默认用户或显式 `USER nginx`（若镜像提供该用户）；无需 root 运行 worker。
+- **健康检查**: 建议 `HEALTHCHECK` 使用 `curl -f http://localhost/__nginx_health__ || exit 1` 或简单 `GET /`，便于编排健康检查。
+- **无多余层**: 不安装非必需包；仅 COPY 配置与必要静态资源（若有）。
+
+示例（仓库根下存在 `nginx/` 目录时）：
+
+```dockerfile
+# nginx/Dockerfile
+FROM nginx:alpine
+
+# Remove default config if you provide full nginx.conf
+# RUN rm -f /etc/nginx/conf.d/default.conf
+
+COPY nginx.conf /etc/nginx/nginx.conf
+COPY conf.d/ /etc/nginx/conf.d/
+
+HEALTHCHECK --interval=10s --timeout=3s --start-period=2s --retries=3 \
+  CMD wget -q -O- http://127.0.0.1/ || exit 1
+
+EXPOSE 80 443
+```
+
+若使用镜像默认主配置、仅追加站点配置：
+
+```dockerfile
+FROM nginx:alpine
+COPY conf.d/ /etc/nginx/conf.d/
+EXPOSE 80 443
+```
+
+## 3. 与编排的衔接 (Compose)
+
+- **镜像来源**: 可为本地构建 `docker build -t my-nginx:local nginx/`，或从 ACR 拉取（若启用 CI 推送）。
+- **挂载**: 若需开发时热更新配置，可在 compose 中挂载 `./nginx/conf.d:/etc/nginx/conf.d:ro`；生产建议打进镜像，不挂载。
+- **端口**: 仅 Nginx 服务映射 `80:80`、`443:443`，与 nginx-gateway.mdc 一致。
+
+## 4. CI 构建（可选）(GitHub Actions)
+
+若在 Git 上构建并推送 Nginx 镜像到 ACR：
+
+- **触发**: 仅当 `nginx/**` 或对应 workflow 变更时触发（paths 过滤）。
+- **Registry**: 与 base-node 同地域/账号时，使用同一 ACR 地址（如 `crpi-5nqoro6hoopis4cp.cn-beijing.personal.cr.aliyuncs.com`），命名空间可为 `capyexports`，镜像名如 `nginx-gateway` 或 `nginx`。
+- **标签**: 与 base 策略一致，推送 `:latest` 和 `:YYYYMMDD`。
+- **登录**: 使用 **Organization secrets**：`ACR_USERNAME`、`ACR_PASSWORD`、`ACR_NAMESPACE`；禁止硬编码。组织为仓库授权后，workflow 中直接引用即可，无需声明 environment。
+- **构建上下文**: 若 Nginx 在子目录，使用 `context: .` 且 `file: nginx/Dockerfile`，或 `context: nginx` 且 `file: nginx/Dockerfile`（根据仓库结构二选一）。
+
+## 5. 禁止项 (Don'ts)
+
+- 禁止在 Nginx 镜像内安装非必需软件（如 Node、Python）；仅网关与配置。
+- 禁止在构建中写死 ACR 地址或凭据；一律使用 Organization secrets 或构建参数。
+- 禁止将 `conf.d/` 内配置写成依赖宿主机路径或宿主机 IP；仅使用 Compose 服务名（见 nginx-gateway.mdc）。

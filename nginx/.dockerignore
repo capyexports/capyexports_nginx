@@ -1,0 +1,5 @@
+# Exclude unrelated files from build context
+*.md
+.git
+.gitignore
+*.mdc

@@ -1,0 +1,12 @@
+# OS / editor
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local overrides (if any)
+*.local
+.env
+.env.*
+!.env.example

@@ -1,0 +1,68 @@
+---
+description: Nginx 作为唯一入口的网关配置规范，与 Demo 编排架构一致。
+globs: ["nginx/**/*.conf", "**/nginx/conf.d/*.conf", "docker-compose.yml"]
+alwaysApply: false
+---
+
+# Nginx Gateway & Demo 架构规范
+
+Nginx 是“网关 + 私有网络”架构中的**唯一入口**，所有外部流量经 80/443 进入，再通过内部网络转发到 Demo 容器。
+
+## 1. 架构约束 (Architecture)
+
+- **唯一入口**: 仅 Nginx 容器对外暴露 `80`、`443`；Demo 容器**不得**在宿主机上暴露端口。
+- **内部转发**: 使用 Docker 内部网络，通过 **Compose 服务名** 作为 `proxy_pass` 的 host（如 `http://demo-app:3000`）。
+- **目录约定**: 站点配置放在 `nginx/conf.d/`，主配置或片段按项目约定放置于 `nginx/` 下。
+
+## 2. 配置规范 (Config Standards)
+
+### 2.1 反向代理到 Demo
+
+- 使用 **upstream** 或直接 **proxy_pass** 到**服务名:内部端口**（与 docker-compose 中 service 名、expose 端口一致）。
+- 必须设置 `proxy_set_header Host $host`、`proxy_set_header X-Real-IP $remote_addr`、`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`、`proxy_set_header X-Forwarded-Proto $scheme`，便于 Demo 获取真实客户端信息。
+- WebSocket 需加 `proxy_http_version 1.1`、`proxy_set_header Upgrade $http_upgrade`、`proxy_set_header Connection "upgrade"`。
+
+示例（按路径转发到不同 Demo）：
+
+```nginx
+# nginx/conf.d/demos.conf
+upstream demo_app {
+    server demo-app:3000;
+}
+
+server {
+    listen 80;
+    server_name _;
+
+    location /demo-app/ {
+        proxy_pass http://demo_app/;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### 2.2 仅 Nginx 暴露端口
+
+在 `docker-compose.yml` 中：
+
+- **Nginx 服务**: 映射 `80:80`、`443:443`（若启用 HTTPS）。
+- **Demo 服务**: 仅使用 `expose` 或内部端口，**不要**使用 `ports` 映射到宿主机。
+
+### 2.3 日志与资源
+
+- 访问/错误日志路径与主配置一致；若需控制磁盘占用（40GB 约束），在 Docker 侧对 Nginx 容器配置 `logging.driver` 的 `max-size: 20m`。
+- Nginx 容器建议设置 `deploy.resources.limits.memory`（如 256M），与 4G 实例资源约束一致。
+
+## 3. 新增 Demo 接入步骤
+
+1. 在 `docker-compose.yml` 中为 Demo 定义 service，加入与 Nginx 共用的 **networks**，**不**写 `ports`。
+2. 在 `nginx/conf.d/` 下新增或修改 `*.conf`，添加 `location` 与 `proxy_pass` 到该 service 名及内部端口。
+3. 重载 Nginx：`docker compose exec nginx nginx -s reload`（或重启 nginx 容器）。
+
+## 4. 禁止项 (Don'ts)
+
+- 禁止在 Demo 的 compose 中为对外访问而使用 `ports: "3000:3000"` 等映射。
+- 禁止在 Nginx 配置中写死宿主机 IP 或与编排无关的地址；一律使用 **Compose 服务名** 作为 upstream/server。
